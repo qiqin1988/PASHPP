@@ -1,0 +1,760 @@
+import React, { useState, useEffect } from 'react';
+
+// URL Google Apps Script terbaru anda yang aktif secara terus (live)
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyOvdoqVuA0QK79qcwKhyIhFDcjSjkpkZqchLtjWNfWoc5cQuP5XDJAJYs6ZAaeBCzO/exec";
+
+// Data simulasi telah dipadamkan sepenuhnya untuk memastikan hanya data live sahaja dipaparkan
+const SIMULASI_OFFLINE = [];
+
+// Fungsi Pembantu: Normalisasikan jenis pas daripada Google Sheet kepada format standard sistem
+const normalisasikanJenisPas = (val) => {
+  if (!val) return 'PAS SEMENTARA';
+  const strClean = val.toString().trim().toUpperCase();
+  if (strClean.includes('BERGAMBAR')) {
+    return 'PAS BERGAMBAR';
+  }
+  return 'PAS SEMENTARA';
+};
+
+// Fungsi Pembantu: Kira tarikh akhir (Mula Penempatan + 30 Hari)
+const kiraTarikhAkhir = (tarikhMula) => {
+  if (!tarikhMula) return '-';
+  try {
+    const tarikhAsal = new Date(tarikhMula);
+    if (isNaN(tarikhAsal.getTime())) return '-';
+    tarikhAsal.setDate(tarikhAsal.getDate() + 30);
+    return tarikhAsal.toISOString().split('T')[0];
+  } catch (e) {
+    return '-';
+  }
+};
+
+export default function App() {
+  const [dataPas, setDataPas] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [statusLive, setStatusLive] = useState('connecting'); // 'connecting' | 'connected' | 'error'
+  const [ralatMesej, setRalatMesej] = useState('');
+  
+  // Negeri penapisan data untuk jadual pemantauan
+  const [carian, setCarian] = useState('');
+  const [filterStatus, setFilterStatus] = useState('Semua');
+  const [filterJenisPas, setFilterJenisPas] = useState('Semua');
+
+  // Negeri Modal Kustom
+  const [modal, setModal] = useState({
+    isOpen: false,
+    title: '',
+    message: '',
+    type: 'info'
+  });
+
+  const TARIKH_HARI_INI = new Date().toISOString().split('T')[0];
+
+  const paparModal = (title, message, type = 'info') => {
+    setModal({ isOpen: true, title, message, type });
+  };
+
+  const tutupModal = () => {
+    setModal(prev => ({ ...prev, isOpen: false }));
+  };
+
+  // Membaca Data Dari Google Sheet Secara Live
+  const ambilDataGoogleSheet = async () => {
+    setLoading(true);
+    setStatusLive('connecting');
+    setRalatMesej('');
+    try {
+      const response = await fetch(`${APPS_SCRIPT_URL}?action=read`);
+      if (!response.ok) throw new Error(`HTTP Ralat: status ${response.status}`);
+      const data = await response.json();
+      
+      if (Array.isArray(data)) {
+        // Melakukan normalisasi jenis pas kepada semua data yang ditarik secara live
+        const dataDinormalisasi = data.map(item => ({
+          ...item,
+          jenisPas: normalisasikanJenisPas(item.jenisPas)
+        }));
+        setDataPas(dataDinormalisasi);
+        setStatusLive('connected');
+        setRalatMesej('');
+      } else {
+        throw new Error("Respon bukan format senarai data.");
+      }
+    } catch (err) {
+      console.error(err);
+      setStatusLive('error');
+      // Memastikan data simulasi offline juga melalui proses normalisasi
+      const dataOfflineNormal = SIMULASI_OFFLINE.map(item => ({
+        ...item,
+        jenisPas: normalisasikanJenisPas(item.jenisPas)
+      }));
+      setDataPas(dataOfflineNormal);
+      setRalatMesej("Gagal memuat naik data secara live dari Google Sheet. Sila semak sambungan internet anda.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    ambilDataGoogleSheet();
+  }, []);
+
+  // Mengesahkan Pemulangan Pas Keselamatan (Live Kemaskini ke Google Sheet)
+  const handleSahkanPemulangan = async (noSiri, namaPemegang, statusNilai = TARIKH_HARI_INI) => {
+    setLoading(true);
+    try {
+      const urlTindakan = `${APPS_SCRIPT_URL}?action=update&noSiriPas=${encodeURIComponent(noSiri)}&tarikhPulang=${encodeURIComponent(statusNilai)}`;
+      const response = await fetch(urlTindakan);
+      const hasil = await response.json();
+      
+      if (hasil.status === 'success') {
+        let mesejBerjaya = `Rekod pas ${noSiri} milik ${namaPemegang} telah berjaya dikemaskini di Google Sheet.`;
+        if (statusNilai === 'HILANG') {
+          mesejBerjaya = `Pas ${noSiri} milik ${namaPemegang} telah ditandakan sebagai HILANG dalam Google Sheet.`;
+        } else if (statusNilai === 'LAPORAN POLIS') {
+          mesejBerjaya = `Pas ${noSiri} milik ${namaPemegang} ditandakan: TELAH BUAT LAPORAN POLIS.`;
+        }
+        
+        paparModal("Kemaskini Berjaya", mesejBerjaya, "success");
+        ambilDataGoogleSheet(); // Segarkan data selepas kemas kini
+      } else {
+        throw new Error('Siri pas keselamatan tidak ditemui di Google Sheet.');
+      }
+    } catch (err) {
+      // Jika dalam mod simulasi / ralat sambungan, lakukan secara tempatan
+      if (statusLive !== 'connected') {
+        const dataBaru = dataPas.map(p => {
+          if (p.noSiriPas === noSiri) {
+            return { ...p, tarikhPulang: statusNilai };
+          }
+          return p;
+        });
+        setDataPas(dataBaru);
+        paparModal("Simulasi Berjaya", `[MOD DEMO] Status pas ${noSiri} milik ${namaPemegang} disetkan kepada: ${statusNilai}.`, "success");
+      } else {
+        paparModal("Ralat Kemas Kini", `Gagal mengemaskini Google Sheet: ${err.message}`, "error");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Membatalkan Status Pemulangan (Memadam tarikh pulang di Sheet)
+  const handleBatalkanPemulangan = async (noSiri) => {
+    setLoading(true);
+    try {
+      const urlTindakan = `${APPS_SCRIPT_URL}?action=update&noSiriPas=${encodeURIComponent(noSiri)}&tarikhPulang=`;
+      const response = await fetch(urlTindakan);
+      const hasil = await response.json();
+      
+      if (hasil.status === 'success') {
+        ambilDataGoogleSheet();
+      } else {
+        throw new Error('Gagal memproses pembatalan.');
+      }
+    } catch (err) {
+      if (statusLive !== 'connected') {
+        const dataBaru = dataPas.map(p => {
+          if (p.noSiriPas === noSiri) {
+            return { ...p, tarikhPulang: null };
+          }
+          return p;
+        });
+        setDataPas(dataBaru);
+      } else {
+        paparModal("Ralat", "Gagal memproses pembatalan.", "error");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Pengiraan Statistik HPP Dashboard
+  const totalPas = dataPas.length;
+  
+  // Telah Pulang (Diisi tarikh sebenar, bukan tanda Hilang/Laporan Polis)
+  const sudahPulangCount = dataPas.filter(p => p.tarikhPulang && p.tarikhPulang !== '' && p.tarikhPulang !== '-' && p.tarikhPulang !== 'HILANG' && p.tarikhPulang !== 'LAPORAN POLIS').length;
+  
+  // Kehilangan Pas
+  const hilangCount = dataPas.filter(p => p.tarikhPulang === 'HILANG').length;
+
+  // Telah Buat Laporan Polis
+  const laporPolisCount = dataPas.filter(p => p.tarikhPulang === 'LAPORAN POLIS').length;
+
+  // Belum Dipulangkan (Semua yang belum balik termasuk hilang & laporan polis)
+  const belumPulangCount = totalPas - sudahPulangCount;
+
+  // Mengesan Kelewatan: Jika melepasi 30 hari dari Tarikh Penempatan dan belum pulangkan / belum hilang
+  const lewatCount = dataPas.filter(p => {
+    const belumPulang = !p.tarikhPulang || p.tarikhPulang === '' || p.tarikhPulang === '-';
+    if (!belumPulang) return false;
+    
+    if (p.tarikhPenempatan) {
+      const penempatanMs = new Date(p.tarikhPenempatan).getTime();
+      const hariIniMs = new Date(TARIKH_HARI_INI).getTime();
+      const perbezaanHari = (hariIniMs - penempatanMs) / (1000 * 60 * 60 * 24);
+      return perbezaanHari > 30; // Tandakan lewat jika penempatan > 30 hari
+    }
+    return false;
+  }).length;
+
+  // Mengelaskan Status Pas
+  const dapatkanStatusPas = (item) => {
+    if (item.tarikhPulang === 'HILANG') {
+      return 'Kehilangan Pas';
+    }
+    if (item.tarikhPulang === 'LAPORAN POLIS') {
+      return 'Laporan Polis';
+    }
+    if (item.tarikhPulang && item.tarikhPulang !== '' && item.tarikhPulang !== '-') {
+      return 'Sudah Pulang';
+    }
+    
+    if (item.tarikhPenempatan) {
+      const penempatanMs = new Date(item.tarikhPenempatan).getTime();
+      const hariIniMs = new Date(TARIKH_HARI_INI).getTime();
+      const perbezaanHari = (hariIniMs - penempatanMs) / (1000 * 60 * 60 * 24);
+      if (perbezaanHari > 30) return 'Lewat';
+    }
+    return 'Belum Pulang';
+  };
+
+  // Proses Carian dan Penapisan data untuk paparan jadual
+  const dataDitapis = dataPas.filter(item => {
+    const status = dapatkanStatusPas(item);
+    if (filterStatus === 'Sudah Pulang' && status !== 'Sudah Pulang') return false;
+    if (filterStatus === 'Belum Pulang' && status !== 'Belum Pulang' && status !== 'Lewat') return false;
+    if (filterStatus === 'Lewat' && status !== 'Lewat') return false;
+    if (filterStatus === 'Kehilangan Pas' && status !== 'Kehilangan Pas') return false;
+    if (filterStatus === 'Laporan Polis' && status !== 'Laporan Polis') return false;
+    if (filterJenisPas !== 'Semua' && item.jenisPas !== filterJenisPas) return false;
+
+    const query = carian.toLowerCase();
+    return (
+      (item.nama && item.nama.toLowerCase().includes(query)) ||
+      (item.noSiriPas && item.noSiriPas.toString().toLowerCase().includes(query)) ||
+      (item.institusi && item.institusi.toLowerCase().includes(query)) ||
+      (item.noKp && item.noKp.toString().includes(query))
+    );
+  });
+
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-800 font-sans flex flex-col antialiased">
+      
+      {/* HEADER UTAMA - TEMA BIRU NAVY PREMIUM */}
+      <header className="bg-gradient-to-r from-slate-950 via-blue-950 to-slate-900 text-white shadow-lg border-b-4 border-blue-600 sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-4">
+          
+          <div className="flex items-center gap-4">
+            <div className="bg-blue-600 text-white p-2.5 rounded-xl shadow-md border border-blue-400/30">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+            </div>
+            <div>
+              <div className="flex items-center gap-2.5 flex-wrap text-left">
+                <h1 className="text-lg md:text-xl lg:text-2xl font-extrabold tracking-tight">Sistem Pemantauan Pas Keselamatan</h1>
+                {statusLive === 'connected' ? (
+                  <span className="bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[9px] uppercase font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block animate-ping"></span>
+                    Live Google Sheet
+                  </span>
+                ) : (
+                  <span className="bg-amber-500/20 text-amber-300 border border-amber-500/35 text-[9px] uppercase font-bold px-2.5 py-0.5 rounded-full">
+                    Sistem Simulasi
+                  </span>
+                )}
+              </div>
+              <p className="text-blue-200 text-xs md:text-sm font-semibold text-left uppercase tracking-wider mt-0.5">Unit Latihan dan Kompetensi • Hospital Pulau Pinang</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2.5 items-center">
+            {/* Status Penunjuk Connection */}
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-blue-200 flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${statusLive === 'connected' ? 'bg-blue-400 shadow-[0_0_8px_#3b82f6]' : statusLive === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'} inline-block`}></span>
+              <span className="font-semibold">{statusLive === 'connected' ? 'Live Bersambung' : statusLive === 'connecting' ? 'Menghubungkan...' : 'Sambungan Terputus'}</span>
+            </div>
+
+            <button
+              onClick={() => ambilDataGoogleSheet()}
+              disabled={loading}
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 text-white text-xs font-bold px-4 py-2 rounded-xl transition flex items-center gap-1.5 shadow-md"
+            >
+              🔄 Refresh Data
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* BAR AMARAN RALAT JIKA ADA */}
+      {ralatMesej && (
+        <div className="p-3 text-xs font-semibold bg-rose-50 text-rose-800 border-b border-rose-200 text-left">
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <p className="flex items-center gap-1.5">⚠️ {ralatMesej}</p>
+            <button onClick={() => setRalatMesej('')} className="font-bold hover:underline">Tutup</button>
+          </div>
+        </div>
+      )}
+
+      {/* JALUR UTAMA KANDUNGAN - SEMUA DISUSUN TERUS KE BAWAH */}
+      <main className="flex-grow max-w-7xl w-full mx-auto px-4 py-6 sm:px-6 lg:px-8 space-y-8">
+        
+        {loading ? (
+          <div className="py-24 flex flex-col items-center justify-center text-slate-500">
+            <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-600 border-t-transparent mb-3"></div>
+            <p className="text-xs font-semibold">Mengambil maklumat terkini dari Google Sheet...</p>
+          </div>
+        ) : (
+          <>
+            {/* SEKSYEN 1: KAD STATISTIK KPI UTAMA (5 GRID) */}
+            <section className="space-y-3">
+              <h2 className="text-sm font-extrabold text-blue-950 uppercase tracking-wider text-left border-l-4 border-blue-600 pl-2">Prestasi KPI Pemantauan Pas</h2>
+              
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                
+                {/* 1. Jumlah Rekod */}
+                <div className="bg-white rounded-2xl shadow-xs border border-slate-100 p-4 flex flex-col justify-between text-left">
+                  <span className="text-slate-500 text-[10px] font-bold uppercase tracking-wider">Jumlah Rekod</span>
+                  <div className="flex items-baseline justify-between mt-2">
+                    <span className="text-2xl font-black text-slate-800 font-mono">{totalPas}</span>
+                    <span className="text-xl">📊</span>
+                  </div>
+                </div>
+
+                {/* 2. Belum Dipulangkan */}
+                <div className="bg-white rounded-2xl shadow-xs border border-slate-100 p-4 flex flex-col justify-between text-left">
+                  <span className="text-amber-600 text-[10px] font-bold uppercase tracking-wider">Belum Pulang</span>
+                  <div className="flex items-baseline justify-between mt-2">
+                    <span className="text-2xl font-black text-amber-600 font-mono">{belumPulangCount}</span>
+                    <span className="text-xl">⏳</span>
+                  </div>
+                </div>
+
+                {/* 3. Lewat Tempoh */}
+                <div className="bg-white rounded-2xl shadow-xs border border-slate-100 p-4 flex flex-col justify-between text-left">
+                  <span className="text-red-600 text-[10px] font-bold uppercase tracking-wider">Lewat Tempoh</span>
+                  <div className="flex items-baseline justify-between mt-2">
+                    <span className="text-2xl font-black text-red-600 font-mono">{lewatCount}</span>
+                    <span className="text-xl">⏰</span>
+                  </div>
+                </div>
+
+                {/* 4. Kehilangan Pas */}
+                <div className="bg-white rounded-2xl shadow-xs border border-slate-100 p-4 flex flex-col justify-between text-left">
+                  <span className="text-orange-600 text-[10px] font-bold uppercase tracking-wider">Kehilangan Pas</span>
+                  <div className="flex items-baseline justify-between mt-2">
+                    <span className="text-2xl font-black text-orange-600 font-mono">{hilangCount}</span>
+                    <span className="text-xl">❌</span>
+                  </div>
+                </div>
+
+                {/* 5. Telah Dipulangkan */}
+                <div className="bg-white rounded-2xl shadow-xs border border-slate-100 p-4 flex flex-col justify-between text-left">
+                  <span className="text-emerald-600 text-[10px] font-bold uppercase tracking-wider">Telah Pulang</span>
+                  <div className="flex items-baseline justify-between mt-2">
+                    <span className="text-2xl font-black text-emerald-600 font-mono">{sudahPulangCount}</span>
+                    <span className="text-xl">✅</span>
+                  </div>
+                </div>
+
+              </div>
+            </section>
+
+            {/* SEKSYEN 2: GRAF & KELEWATAN */}
+            <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              
+              {/* Kadar Pemulangan - DIKECILKAN (col-span-3) */}
+              <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col justify-between text-left lg:col-span-3">
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-sm md:text-base">Kadar Pemulangan</h3>
+                  <p className="text-[11px] text-slate-500 mt-1">Peratusan pas selamat dikembalikan</p>
+                  
+                  <div className="mt-6 flex flex-col items-center justify-center">
+                    <div className="relative w-28 h-28 flex items-center justify-center">
+                      <svg className="w-full h-full transform -rotate-90">
+                        <circle cx="56" cy="56" r="46" stroke="#f1f5f9" strokeWidth="8" fill="transparent" />
+                        <circle 
+                          cx="56" 
+                          cy="56" 
+                          r="46" 
+                          stroke="#2563eb" 
+                          strokeWidth="8" 
+                          fill="transparent" 
+                          strokeDasharray={289}
+                          strokeDashoffset={289 - (289 * (totalPas > 0 ? (sudahPulangCount / totalPas) : 0))}
+                          className="transition-all duration-1000 ease-out"
+                        />
+                      </svg>
+                      <div className="absolute text-center">
+                        <span className="text-xl font-black text-slate-800 font-mono">
+                          {totalPas > 0 ? Math.round((sudahPulangCount / totalPas) * 100) : 0}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="border-t border-slate-100 mt-4 pt-3 grid grid-cols-2 text-center text-[11px]">
+                  <div>
+                    <span className="text-emerald-600 font-bold block">{sudahPulangCount} Pas</span>
+                    <span className="text-slate-400">Telah Pulang</span>
+                  </div>
+                  <div className="border-l border-slate-100">
+                    <span className="text-blue-600 font-bold block">{belumPulangCount} Pas</span>
+                    <span className="text-slate-400">Belum Pulang</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Agihan Jenis Pas - DIKECILKAN (col-span-3) */}
+              <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-left lg:col-span-3 flex flex-col justify-between">
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-sm md:text-base">Pecahan Pas</h3>
+                  <p className="text-[11px] text-slate-500 mt-1">Agihan mengikut Unit Latihan</p>
+                  
+                  <div className="mt-4 space-y-4">
+                    {['PAS SEMENTARA', 'PAS BERGAMBAR'].map(jenis => {
+                      const count = dataPas.filter(p => p.jenisPas === jenis).length;
+                      const peratus = totalPas > 0 ? (count / totalPas) * 100 : 0;
+                      
+                      let warnaBar = 'bg-blue-500';
+                      if (jenis === 'PAS BERGAMBAR') warnaBar = 'bg-slate-800';
+
+                      return (
+                        <div key={jenis} className="space-y-1">
+                          <div className="flex justify-between text-[11px] font-bold text-slate-700">
+                            <span>{jenis.split(' ')[1]}</span>
+                            <span className="font-mono bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 font-semibold">{count}</span>
+                          </div>
+                          <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                            <div className={`h-full ${warnaBar}`} style={{ width: `${peratus}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="border-t border-slate-100 mt-4 pt-3 text-center text-[10px] text-slate-400">
+                  Kemaskini Masa Nyata
+                </div>
+              </div>
+
+              {/* Amaran Kelewatan, Hilang & Laporan Polis - DIBESARKAN (col-span-6) */}
+              <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col text-left lg:col-span-6">
+                <h3 className="font-extrabold text-slate-800 text-base">Kelewatan & Kehilangan Pas</h3>
+                <p className="text-xs text-slate-500 mt-1">Pemegang pas yang lewat dikembalikan atau disahkan hilang (Had penempatan: 30 Hari)</p>
+                
+                <div className="mt-4 flex-grow overflow-y-auto max-h-80 pr-1 space-y-2.5">
+                  {dataPas.filter(p => {
+                    const status = dapatkanStatusPas(p);
+                    return status === 'Lewat' || status === 'Kehilangan Pas';
+                  }).length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center py-16">
+                      <span className="text-3xl">🎉</span>
+                      <p className="text-xs font-bold text-slate-600 mt-2">Semua Rekod Terkawal</p>
+                    </div>
+                  ) : (
+                    dataPas
+                      .filter(p => {
+                        const status = dapatkanStatusPas(p);
+                        return status === 'Lewat' || status === 'Kehilangan Pas';
+                      })
+                      .map((p, index) => {
+                        const status = dapatkanStatusPas(p);
+                        const tarikhAkhirFormat = kiraTarikhAkhir(p.tarikhPenempatan);
+                        return (
+                          <div key={`critical-${p.noSiriPas || 'empty'}-${p.rowNumber || index}-${index}`} className={`p-4 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs gap-3 ${status === 'Kehilangan Pas' ? 'bg-orange-50 border-orange-200' : 'bg-rose-50 border-rose-200'}`}>
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-slate-900 font-mono text-sm">{p.noSiriPas}</span>
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${status === 'Kehilangan Pas' ? 'bg-orange-200 text-orange-900' : 'bg-red-200 text-red-900'}`}>{status}</span>
+                              </div>
+                              <span className="font-bold text-slate-800 block text-sm">{p.nama}</span>
+                              <div className="flex flex-col text-[10px] text-slate-500 space-y-0.5">
+                                <span>Mula Penempatan: <strong>{p.tarikhPenempatan}</strong></span>
+                                <span className={status === 'Kehilangan Pas' ? "text-orange-700 font-extrabold" : "text-rose-700 font-extrabold"}>
+                                  Tarikh Akhir: {tarikhAkhirFormat}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 mt-2 sm:mt-0">
+                              {status === 'Lewat' && (
+                                <button
+                                  onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama, 'HILANG')}
+                                  className="bg-orange-500 hover:bg-orange-600 text-white px-2.5 py-1 rounded-md font-medium text-[9px] transition opacity-80 hover:opacity-100 whitespace-nowrap"
+                                >
+                                  Lapor Hilang
+                                </button>
+                              )}
+                              {status === 'Kehilangan Pas' && (
+                                <button
+                                  onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama, 'LAPORAN POLIS')}
+                                  className="bg-blue-950 hover:bg-blue-900 text-white px-2.5 py-1 rounded-md font-medium text-[9px] transition opacity-80 hover:opacity-100 whitespace-nowrap"
+                                >
+                                  Lapor Polis
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama)}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-extrabold text-xs transition shadow-md whitespace-nowrap hover:scale-105 transform"
+                              >
+                                Pulang Pas
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                  )}
+                </div>
+              </div>
+
+            </section>
+
+            {/* SEKSYEN 3: PANGKALAN DATA PEMANTAUAN UTAMA (JADUAL) */}
+            <section className="space-y-4">
+              <h2 className="text-sm font-extrabold text-blue-950 uppercase tracking-wider text-left border-l-4 border-blue-600 pl-2">Pangkalan Data Pemantauan Rekod</h2>
+              
+              {/* Panel Carian & Tapisan Di Atas Jadual */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 flex flex-col lg:flex-row gap-4 items-center justify-between">
+                
+                <div className="relative w-full lg:w-80">
+                  <input
+                    type="text"
+                    placeholder="Cari No Siri, Nama, Institusi..."
+                    value={carian}
+                    onChange={(e) => setCarian(e.target.value)}
+                    className="w-full pl-9 pr-4 py-2.5 text-xs border border-slate-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <div className="absolute left-3.5 top-3 text-slate-400">🔍</div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                  
+                  {/* Penapis Status dengan pilihan Kehilangan & Laporan Polis */}
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                    <span>Status Pulang:</span>
+                    <div className="flex bg-slate-100 p-1 rounded-xl gap-1 flex-wrap">
+                      {['Semua', 'Belum Pulang', 'Lewat', 'Kehilangan Pas', 'Laporan Polis', 'Sudah Pulang'].map(status => (
+                        <button
+                          key={status}
+                          onClick={() => setFilterStatus(status)}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] md:text-[11px] font-bold transition ${
+                            filterStatus === status 
+                              ? 'bg-white text-blue-900 shadow-xs' 
+                              : 'text-slate-600 hover:text-slate-800'
+                          }`}
+                        >
+                          {status === 'Sudah Pulang' ? 'Telah Pulang' : status}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Penapis Kategori Jenis Pas */}
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                    <span>Jenis Pas:</span>
+                    <select
+                      value={filterJenisPas}
+                      onChange={(e) => setFilterJenisPas(e.target.value)}
+                      className="bg-slate-100 border border-slate-300 rounded-xl py-1.5 px-3 text-xs font-bold focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="Semua">Semua Pas</option>
+                      <option value="PAS SEMENTARA">PAS SEMENTARA</option>
+                      <option value="PAS BERGAMBAR">PAS BERGAMBAR</option>
+                    </select>
+                  </div>
+
+                </div>
+
+              </div>
+
+              {/* Jadual Utama */}
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden text-left">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs md:text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 uppercase text-[10px] font-bold tracking-wider">
+                        <th className="px-6 py-3">No. Siri Pas</th>
+                        <th className="px-6 py-3">Maklumat Penerima</th>
+                        <th className="px-6 py-3">Institusi & Latihan</th>
+                        <th className="px-6 py-3">Tarikh Mula & Akhir</th>
+                        <th className="px-6 py-3">Hubungi</th>
+                        <th className="px-6 py-3">Tarikh Pulang / Status</th>
+                        <th className="px-6 py-3">Status Semasa</th>
+                        <th className="px-6 py-3 text-right">Tindakan</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {dataDitapis.map((p, index) => {
+                        const status = dapatkanStatusPas(p);
+                        const tarikhAkhirFormat = kiraTarikhAkhir(p.tarikhPenempatan);
+                        return (
+                          <tr key={`jadual-${p.noSiriPas || 'empty'}-${p.rowNumber || index}-${index}`} className="hover:bg-slate-50/50 transition">
+                            
+                            <td className="px-6 py-4 font-bold text-blue-900 font-mono text-sm">{p.noSiriPas}</td>
+
+                            <td className="px-6 py-4">
+                              <div className="font-bold text-slate-800">{p.nama}</div>
+                              <div className="text-[10px] text-slate-400">IC: {p.noKp} • <span className="font-bold text-blue-600">{p.jenisPas}</span></div>
+                              <div className="text-[9px] text-slate-400 mt-0.5 font-mono">Daftar: {p.timestamp}</div>
+                            </td>
+
+                            <td className="px-6 py-4">
+                              <div className="font-bold text-slate-700">{p.institusi}</div>
+                              <div className="text-[10px] text-slate-500">{p.jenisLatihan}</div>
+                            </td>
+
+                            <td className="px-6 py-4 text-slate-600 font-semibold space-y-1">
+                              <div>Mula: {p.tarikhPenempatan}</div>
+                              <div className="text-[10px] text-rose-700">Akhir: {tarikhAkhirFormat}</div>
+                            </td>
+
+                            <td className="px-6 py-4">
+                              <div className="font-mono text-slate-700 font-semibold">{p.noTelefon}</div>
+                              <div className="text-[10px] text-slate-400">{p.email}</div>
+                            </td>
+
+                            <td className="px-6 py-4">
+                              {p.tarikhPulang === 'HILANG' ? (
+                                <span className="text-orange-600 font-bold uppercase">Pas Hilang</span>
+                              ) : p.tarikhPulang === 'LAPORAN POLIS' ? (
+                                <span className="text-blue-950 font-bold uppercase">Laporan Polis Dibuat</span>
+                              ) : p.tarikhPulang ? (
+                                <span className="text-emerald-700 font-black">{p.tarikhPulang}</span>
+                              ) : (
+                                <span className="text-slate-400 italic">Belum Dipulangkan</span>
+                              )}
+                            </td>
+
+                            <td className="px-6 py-4">
+                              {status === 'Sudah Pulang' && (
+                                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2.5 py-1 rounded-full">
+                                  Telah Pulang
+                                </span>
+                              )}
+                              {status === 'Belum Pulang' && (
+                                <span className="bg-blue-100 text-blue-800 text-[10px] font-bold px-2.5 py-1 rounded-full">
+                                  Aktif
+                                </span>
+                              )}
+                              {status === 'Lewat' && (
+                                <span className="bg-red-100 text-red-800 text-[10px] font-bold px-2.5 py-1.5 rounded-full inline-flex items-center gap-1">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-ping"></span>
+                                  Lewat &gt;30 Hari
+                                </span>
+                              )}
+                              {status === 'Kehilangan Pas' && (
+                                <span className="bg-orange-100 text-orange-800 text-[10px] font-bold px-2.5 py-1 rounded-full">
+                                  Pas Hilang
+                                </span>
+                              )}
+                              {status === 'Laporan Polis' && (
+                                <span className="bg-blue-950 text-white text-[10px] font-bold px-2.5 py-1 rounded-full">
+                                  Laporan Polis
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="px-6 py-4 text-right">
+                              <div className="flex justify-end items-center gap-2 flex-wrap">
+                                {(!p.tarikhPulang || p.tarikhPulang === '' || p.tarikhPulang === '-') ? (
+                                  <>
+                                    <button
+                                      onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama)}
+                                      className="bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs px-5 py-2.5 rounded-xl transition shadow-md hover:scale-105 transform"
+                                    >
+                                      Sahkan Pulang
+                                    </button>
+                                    <button
+                                      onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama, 'HILANG')}
+                                      className="bg-orange-500 hover:bg-orange-600 text-white font-medium text-[9px] px-2 py-1 rounded-md transition opacity-80 hover:opacity-100"
+                                    >
+                                      Hilang
+                                    </button>
+                                  </>
+                                ) : p.tarikhPulang === 'HILANG' ? (
+                                  <>
+                                    <button
+                                      onClick={() => handleSahkanPemulangan(p.noSiriPas, p.nama, 'LAPORAN POLIS')}
+                                      className="bg-blue-950 hover:bg-blue-900 text-white font-medium text-[9px] px-2 py-1 rounded-md transition opacity-80 hover:opacity-100"
+                                    >
+                                      Lapor Polis
+                                    </button>
+                                    <button
+                                      onClick={() => handleBatalkanPemulangan(p.noSiriPas)}
+                                      className="border border-slate-300 hover:bg-slate-100 text-slate-600 font-medium text-[9px] px-2 py-1 rounded-md transition"
+                                    >
+                                      Batal Hilang
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    onClick={() => handleBatalkanPemulangan(p.noSiriPas)}
+                                    className="border border-slate-300 hover:bg-slate-100 text-slate-600 font-extrabold text-xs px-4 py-2 rounded-lg transition"
+                                  >
+                                    Batal Pulangan
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+
+                          </tr>
+                        );
+                      })}
+
+                      {dataDitapis.length === 0 && (
+                        <tr>
+                          <td colSpan="8" className="px-6 py-12 text-center text-slate-400">
+                            <p className="font-bold">Tiada data padanan ditemui.</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </>
+        )}
+
+      </main>
+
+      {/* FOOTER */}
+      <footer className="bg-slate-950 text-slate-400 py-6 text-[10px] md:text-xs border-t border-slate-800 mt-auto">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+          <p>© 2026 Unit Latihan dan Kompetensi Hospital Pulau Pinang. Sistem bersepadu pengurusan pas keselamatan.</p>
+        </div>
+      </footer>
+
+      {/* CUSTOM DIALOG BOX MODAL */}
+      {modal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-lg border border-slate-200 max-w-md w-full overflow-hidden transform transition-all text-left">
+            
+            <div className={`px-5 py-4 border-b border-slate-100 font-bold text-sm md:text-base flex items-center gap-2 ${
+              modal.type === 'error' ? 'text-red-700 bg-rose-50' : 'text-blue-900 bg-blue-50'
+            }`}>
+              {modal.title}
+            </div>
+
+            <div className="px-5 py-4 text-slate-600 text-xs md:text-sm leading-relaxed">
+              {modal.message}
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={tutupModal}
+                className="px-5 py-2 bg-blue-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition"
+              >
+                Tutup Mesej
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
